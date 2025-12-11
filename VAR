@@ -1,0 +1,416 @@
+#############################################
+# Script Artigo suinocultura
+# Modelo VAR
+# Data: 29/02/2024
+# Autor: Izabella Maria da Silva Viana
+#############################################
+
+#Limpa o Ambiente Global
+rm(list=ls())
+
+#Inicio do Script
+#Pacotes a serem utilizados
+library(BMRBr)
+library(vars)
+library(forecast)
+library(zoo)
+library(lmtest)
+library(readxl)
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+library(tidyr)
+library(dplyr)
+library(urca)
+library(tidyverse)
+library(plotly)
+library(ggpubr)
+library(tsibble)
+library(fable)
+library(feasts)
+library(tsibbletalk)
+library(fable.prophet)
+library(fabletools)
+
+#Leitura de dados
+data <- readxl::read_excel(path = "C:/Users/porco.xlsx")
+#data = read_xlsx("data.xlsx", header = T)
+data = data[-c(1, 2, 3, 4, 6, 8, 10, 11)]
+data = ts(data, start = c(2014,01), frequency = 12)
+
+dates <- seq(as.Date('2014-01-01'), as.Date('2024-02-01'), 
+             by='1 month')
+
+dados_tbl <- data %>%
+  dplyr::as_tibble() %>%
+  dplyr::mutate(
+    date = seq(as.Date('2014-01-01'), as.Date('2024-02-01'), 
+               by='1 month'))
+
+autoplot(data)
+
+
+# Visualização dos dados
+dados_tbl %>%
+  tidyr::pivot_longer(cols = -"date") %>%
+  dplyr::mutate(
+    name = dplyr::recode(name, "porco_def" = "Suíno vivo", "soja_def" = "Soja", "milho_def" = "Milho")
+  ) %>%
+  ggplot2::ggplot() +
+  ggplot2::aes(x = date, y = value, color = name) +
+  ggplot2::geom_line(size = 1, show.legend = FALSE) +
+  ggplot2::facet_wrap(facets = ~name, scales = "free") +
+  ggplot2::scale_y_continuous(
+    labels = scales::label_number(big.mark = ".", decimal.mark = ",")
+  ) +
+  ggplot2::scale_color_manual(values = c("#282f6b", "#b22200", "seagreen")) +
+  ggplot2::labs(
+    title    = "Preço de milho,soja e  suíno vivo em SC",
+    subtitle = "Séries mensais do preço do kg do milho, soja e  suíno vivo em SC",
+    y        = NULL,
+    x        = NULL,
+    caption  = "**Dados**: CEPEA | **Elaboração**: autores"
+  ) +
+  ggplot2::theme_light() +
+  ggplot2::theme(
+    plot.title       = ggplot2::element_text(size = 20, face = "bold", color = "#282f6b"),
+    plot.subtitle    = ggplot2::element_text(size = 14),
+    plot.caption     = ggtext::element_textbox_simple(size = 10, margin = ggplot2::margin(10)),
+    axis.text        = ggplot2::element_text(size = 12, face = "bold"),
+    strip.background = ggplot2::element_blank(),
+    strip.text       = ggplot2::element_text(size = 12, face = "bold", color = "black")
+  )
+
+# Número de diferenças para tornar a série estacionária----------------------------
+dados_tbl <- tsibble::as_tsibble(dados_tbl, index = date)
+
+feasts::unitroot_ndiffs(dados_tbl$porco_def)
+feasts::unitroot_ndiffs(dados_tbl$soja_def)
+feasts::unitroot_ndiffs(dados_tbl$milho_def)
+
+
+# 3) Diferencia as séries
+dados_por_diff <- diff(dados_tbl$porco_def)
+dados_mil_diff <- diff(dados_tbl$milho_def)
+dados_soj_diff <- diff(dados_tbl$soja_def)
+
+
+dados_diff <- cbind(dados_por_diff, dados_mil_diff, dados_soj_diff)
+
+dados_diff <- ts(
+  data      = dados_diff,
+  start     = 2014,
+  frequency = 12
+)
+
+
+# Teste de causalidade de Granger -----------------------------------------
+
+# Aplicar o teste de Causalidade de Granger
+# H0: série X não Granger-causa série Y
+# H1: série X Granger-causa série Y
+#Teste em reverso
+lmtest::grangertest(
+  y     = dados_diff[, "dados_soj_diff"],
+  x     = dados_diff[, "dados_por_diff"],
+  
+  order = 4 # lags/defasagens, de 1:5 resultados são similares
+) #porco causa soja
+
+# Seleção de defasagens VAR por critérios de informação
+lags_var <- vars::VARselect(
+  y       = dados_diff,
+  lag.max = 12,
+  type    = "const"
+)
+
+lags_var
+
+# Estimar modelo VAR
+fit_var <- vars::VAR(
+  y       = dados_diff,
+  p       = lags_var$selection["SC(n)"],
+  type    = "const",
+  lag.max = 12,
+  ic      = "SC"
+)
+
+
+# Resultados do VAR
+summary(fit_var)
+
+
+
+#Análise da estabilidade do modelo indica que o mesmo é estável uma 
+## vez que as raízes características do polinômio são menores do que um:
+sum.model <- summary(fit_var)
+sum.model[["roots"]]
+
+
+
+#Teste de autocorrelação serial dos resíduos, Ljung-Box indica que 
+## não podemos rejeitar Ho: não há autocorrelação serial dos resíduos.
+vars::serial.test(fit_var, lags.pt = 16, type = "PT.asymptotic")$serial
+
+#Teste de autocorrelação serial dos resíduos, Ljung-Box ajustado 
+## (respectivamente) indica que não podemos rejeitar Ho: não há 
+## autocorrelação serial dos resíduos.
+vars::serial.test(fit_var, lags.pt = 16, type = "PT.adjusted")$serial
+
+#Teste de heterocedasticidade condicional dos resíduos indica que
+## não podemos rejeitar Ho: os resíduos são homocedásticos.
+vars::arch.test(fit_var, lags.multi = 5)$arch.mul
+
+
+#Analisando a matriz de variância-covariância:
+sum.model <- summary(fit_var)
+sum.model$covres
+
+
+#Como os elementos fora da diagonal da matriz não são zero, 
+## podemos supor que há correlação contemporânea entre as variáveis 
+## no modelo VAR.
+
+#Confirmado pela matriz de correlação:
+sum.model$corres
+
+#Dada a matriz de variância-covariância P estimada, a decomposição pode 
+## ser obtida por
+t(chol(sum.model$covres))
+
+#Sigma= P*P'
+
+
+
+
+
+serial.test(fit_var)
+roots(fit_var)
+# Impulso Resposta --------------------------------------------------------
+
+# Obter os coeficientes de impulso resposta do VAR
+
+irf_var <- vars::irf(
+  x        = fit_var,
+  impulse  = "dados_mil_diff",
+  response = "dados_por_diff",
+  n.ahead  = 12
+)
+
+# Plotar gráfico de impulso resposta
+lags = 1:13
+
+df_milho <- data.frame(irf = irf_var$irf, lower = irf_var$Lower, upper = irf_var$Upper,
+                       lags = lags)
+
+colnames(df_milho) <- c('irf', 'lower', 'upper', 'lags')
+
+df_milho 
+
+
+number_ticks <- function(n) {function(limits) pretty(limits, n)}
+
+ggplot(data = df_milho,aes(x=lags,y=irf)) +
+  geom_line(aes(y = upper), colour = 'lightblue2') +
+  geom_line(aes(y = lower), colour = 'lightblue')+
+  geom_line(aes(y = irf), size=.8)+
+  geom_ribbon(aes(x=lags, ymax=upper, 
+                  ymin=lower), 
+              fill="blue", alpha=.1) +
+  xlab("") + ylab("Preço do porco") + 
+  ggtitle("Resposta ao Impulso no preço da milho") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),                    
+        axis.ticks.x=element_blank(),
+        plot.margin = unit(c(2,10,2,10), "mm"))+
+  geom_line(colour = 'black')+
+  scale_x_continuous(breaks=number_ticks(13))+
+  theme_bw()
+
+
+
+# Correlação entre os preços de porco e soja
+df <- data.frame(time=dates, soja=data[,2], porco=data[,1])
+ggplot(df, aes(valor_def_preco_soja, porco_def))+
+  geom_point(colour='black', size=5, shape=20)+
+  geom_smooth(method = 'lm')+
+  xlab('Preço de soja')+
+  ylab('Preço porco vivo')+
+  labs(title='Preço porco vivo vs. Preço de soja')
+
+# Correlação entre os preços de porco e milho
+df <- data.frame(time=dates, porco=data[,1], milho=data[,3])
+ggplot(df, aes(porco_def, milho_def))+
+  geom_point(colour='black', size=5, shape=20)+
+  geom_smooth(method = 'lm')+
+  xlab('Preço porco vivo')+
+  ylab('Preço de milho')+
+  labs(title='Preço porco vivo vs. Preço de milho')
+
+# Correlação entre os preços de soja e milho
+df <- data.frame(time=dates, soja=data[,2], milho=data[,3])
+ggplot(df, aes(soja_def, milho_def))+
+  geom_point(colour='black', size=5, shape=20)+
+  geom_smooth(method = 'lm')+
+  xlab('Preço soja')+
+  ylab('Preço de milho')+
+  labs(title='Preço soja vs. Preço de milho')
+
+
+#decomposição da variância
+fevd.var <- fevd(fit_var, n.ahead=8)
+fevd.var$dados_mil_diff
+plot(fevd.var)
+
+
+#Previsao
+fvar <- predict(fit_var, n.ahead=13, ci=.1)
+fvar$fcst$dados_por_diff
+plot(fvar)
+
+
+
+
+
+
+
+################################################################################
+################################# MELHORAR DEPOIS ##############################
+################################################################################
+
+
+
+porco <- data[,1]
+soja <- data[,2]
+milho <- data[,3]
+
+plot(data, main='Relação de preços',dates=dates)
+
+#Teste de raiz unitaria
+ur.df(porco)
+ur.df(soja)
+ur.df(milho)
+
+summary(ur.df(porco, type='none', lags=1))
+summary(ur.df(soja, type='none', lags=1))
+summary(ur.df(milho, type='none', lags=1))
+
+
+
+
+#Primeira diferença
+dporco <- diff(porco)
+summary(ur.df(dporco, type='none', lags=0))
+
+dsoja <- diff(soja)
+summary(ur.df(dsoja, type='none', lags=0))
+
+dmilho <- diff(milho)
+summary(ur.df(dmilho, type='none', lags=0))
+
+#Procedimento de Toda-Yamamoto
+#Definicao do numero maximo de lags
+print(12*(length(dados_diff)/100)^(1/4))
+
+#Estatistica de Teste DFGLS para suinos
+goT.dfgls <- ur.ers(dados_diff[,1], type = c("DF-GLS"),
+                    model = c("trend"),
+                    lag.max = 14)
+summary(goT.dfgls)
+
+spT.dfgls <- ur.ers(dados_diff[,2], type = c("DF-GLS"),
+                    model = c("trend"),
+                    lag.max = 15)
+summary(spT.dfgls)
+
+mgT.dfgls <- ur.ers(dados_diff[,3], type = c("DF-GLS"),
+                    model = c("trend"),
+                    lag.max = 16)
+summary(mgT.dfgls)
+
+
+#Determinacao do lag da Defasagem
+VARselect(dados_diff, lag.max = 15, season=12, type='const')$selection
+
+# Teste de Cointegracao - Maximo Autovalor com 2 defasagens
+teste.coint <- ca.jo(dados_diff, type='eigen', K=2, ecdet='const', 
+                     spec='longrun')
+
+
+#Resultado para cada Vetor de Co-integracao
+teste.coint@teststat[1] #H0: r=2 nao pode ser rejeitado
+teste.coint@teststat[2] #H0: r=1 nao pode ser rejeitado
+teste.coint@teststat[3] #H0: r=0 nao pode ser rejeitado
+teste.coint@cval
+
+#Outra opcao para receber todos os resultados do Teste de CI
+summary(teste.coint)
+
+### Teste de Cointegracao - Teste do Traco - 2 opcao de teste
+teste.traco <- ca.jo(dados_diff, type='trace', K=2, ecdet='const', 
+                     spec='longrun')
+summary(teste.traco)
+
+
+#Estimaçao do Modelo Var(1)
+var <- VAR(dados_diff, p = 1, type='none')
+summary(var)
+
+roots(var)
+
+
+#Analise das Funcoes Impulso Resposta
+#Impulso em soja e resposta em suino e milho
+irfsosu <- irf(var, impulse='valor_def_preco_soja', response='valor_def_preco_porco', n.ahead = 10,
+               ortho = TRUE, cumulative = FALSE, boot = TRUE, ci = 0.95,
+               runs = 100)
+plot(irfsosu)
+
+irfsomi <- irf(var, impulse='valor_def_preco_soja', response='valor_def_preco_milho',
+               boot = F, n.ahead=12, cumulative = F, ortho=F)
+plot(irfsomi)
+
+#Impulso em milho e resposta em suino e soja
+irfmisu <- irf(var, impulse='valor_def_preco_milho', response='valor_def_preco_porco',
+               boot = F, n.ahead=12, cumulative = F, ortho=F)
+plot(irfmisu)
+
+irfmiso <- irf(var, impulse='valor_def_preco_milho', response='valor_def_preco_soja',
+               boot = F, n.ahead=12, cumulative = F, ortho=F)
+plot(irfmiso)
+
+#Impulso em suino e resposta em soja e milho
+irfsuso <- irf(var, impulse='valor_def_preco_porco', response='valor_def_preco_soja',
+               boot = F, n.ahead=12, cumulative = F, ortho=F)
+plot(irfsuso)
+
+irfsumi <- irf(var, impulse='valor_def_preco_porco', response='valor_def_preco_milho',
+               boot = F, n.ahead=12, cumulative = F, ortho=F)
+plot(irfsumi)
+
+#Decomposicao da Variancia
+fevd.var <- fevd(var, n.ahead=12)
+fevd.var$valor_def_preco_porco
+
+
+#Analise da Autocorrelaçao nos residuos
+serial.test(var)
+
+#Previsao
+fvar <- predict(var, n.ahead=12, ci=.3)
+fvar$fcst$valor_def_preco_porco
+plot(fvar)
+
+
+#Teste de Causalidade de Granger
+causality(var, cause = "valor_def_preco_porco")$Granger
+causality(var, cause = "valor_def_preco_soja")$Granger
+causality(var, cause = "valor_def_preco_milho")$Granger
+
+
+
+
+
+q(save='yes')
+
+
